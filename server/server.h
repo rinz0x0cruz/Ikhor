@@ -1,35 +1,30 @@
-#ifndef INCLUDE_HTTP_TCPSERVER_LINUX
-#define INCLUDE_HTTP_TCPSERVER_LINUX
+#ifndef SERVER_H
+#define SERVER_H
 
-#include<stdio.h>
-#include<sys/socket.h>
-#include<arpa/inet.h>
-#include<stdlib.h>
-#include<string>
+#include <iostream>
+#include <string>
+#include <thread>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <cstring>
+#include <sys/socket.h>
+#include <stdexcept>
 
-namespace http
-{
-    class TcpServer{
-        public:
-            TcpServer(std::string ip, int port);
-            ~TcpServer();
-            void startListen();
-            
-        private:
-            std::string m_ip;
-            int m_port;
-            int m_socket;
-            int m_new_socket;
-            struct sockaddr_in m_socketAddress;
-            unsigned int m_socketAddress_len;
-            std::string m_serverMessage;
+#define PORT 12345
+#define MAX_CONNECTIONS 10
 
-            int startServer();
-            void closeServer();
-            void acceptConnection(int &new_socket);
-            std::string buildResponse();
-            void sendResponse();
-    };
-}
+class TcpServer {
+public:
+    TcpServer();
+    ~TcpServer();
+    void start();
+    void set_socket_timeout(int sock, int seconds);
+    static void handle_client(int client_sock, sockaddr_in client_addr);
 
-#endif
+private:
+    int server_sock;
+    sockaddr_in server_addr;
+};
+
+#endif // SERVER_H

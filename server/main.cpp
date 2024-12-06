@@ -1,9 +1,14 @@
 #include "server.h"
 
-int main(){
-    using namespace http;
-    TcpServer server = TcpServer("127.0.0.1",1234);
-    server.startListen();
-    
+int main() {
+    try {
+        // Create an instance of TcpServer and start it
+        TcpServer server;
+        server.start();
+    } catch (const std::exception& e) {
+        std::cerr << "Server initialization failed: " << e.what() << std::endl;
+        return 1;
+    }
+
     return 0;
 }
